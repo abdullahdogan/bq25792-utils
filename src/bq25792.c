@@ -39,7 +39,6 @@ static int clampi(int v, int lo, int hi) { return (v < lo) ? lo : (v > hi) ? hi 
 
 /* Rough Li-ion OCV -> SoC table (per-cell, mV). Adjust for your chemistry/load profile. */
 static int soc_from_vcell_mv(int vcell_mv) {
-  /* Piecewise-linear between breakpoints */
   static const int mv[]  = { 3300, 3400, 3500, 3600, 3650, 3700, 3800, 3900, 4000, 4100, 4200 };
   static const int soc[] = {    0,   10,   20,   30,   40,   50,   60,   70,   80,   90,  100 };
   if (vcell_mv <= mv[0]) return 0;
@@ -102,7 +101,6 @@ int bq25792_read_u16(bq25792_dev_t *dev, uint8_t reg, uint16_t *val) {
   if (!dev || !val) return -EINVAL;
   int r = i2c_smbus_read_word_data(dev->fd, reg);
   if (r < 0) return -errno;
-  /* i2c_smbus_read_word_data returns SMBus "word" (LSB first) already combined to host-endian */
   *val = (uint16_t)r;
   return 0;
 }
@@ -113,43 +111,20 @@ static int write_u8(bq25792_dev_t *dev, uint8_t reg, uint8_t v) {
   return 0;
 }
 
-static int update_bits_u8(bq25792_dev_t *dev, uint8_t reg, uint8_t mask, uint8_t value) {
-  uint8_t cur = 0;
-  int rc = bq25792_read_u8(dev, reg, &cur);
-  if (rc) return rc;
-  uint8_t next = (cur & ~mask) | (value & mask);
-  if (next == cur) return 0;
-  return write_u8(dev, reg, next);
-}
-
 /*
   REG2E (ADC Control):
    bit7 ADC_EN
    bit6 ADC_RATE: 0=continuous, 1=one-shot
-   bit5-4 ADC_SAMPLE: 0=15-bit eff, 1=14-bit, 2=13-bit, 3=12-bit (default, not recommended)
-   bit3 ADC_AVG: 0=single, 1=running average
-   bit2 ADC_AVG_INIT
+   bit5-4 ADC_SAMPLE: 0=15-bit eff, 1=14-bit, 2=13-bit, 3=12-bit
 */
 int bq25792_adc_enable(bq25792_dev_t *dev, bool enable_continuous, bool high_res_15bit) {
   if (!dev) return -EINVAL;
 
   uint8_t v = 0;
-  /* ADC_EN */
-  v |= (1u << 7);
-
-  /* ADC_RATE */
+  v |= (1u << 7);              /* ADC_EN */
   if (!enable_continuous) v |= (1u << 6); /* 1 = one-shot */
+  if (!high_res_15bit)  v |= (1u << 4);   /* 01b -> 14-bit effective */
 
-  /* ADC_SAMPLE */
-  if (high_res_15bit) {
-    /* 00b */
-    v |= (0u << 4);
-  } else {
-    /* 01b -> 14-bit effective */
-    v |= (1u << 4);
-  }
-
-  /* Keep AVG disabled by default */
   return write_u8(dev, REG2E_ADC_CONTROL, v);
 }
 
@@ -222,31 +197,18 @@ int bq25792_read_status(bq25792_dev_t *dev, bq25792_status_t *st, bool ensure_ad
   st->fault1 = f1;
   st->fault_any = (f0 != 0) || (f1 != 0) || st->watchdog_expired || st->poor_source;
 
-  /* ADC enable if requested */
   if (ensure_adc_on) {
     (void)bq25792_adc_enable(dev, true, true);
   }
 
   /* ADC reads */
   uint16_t w = 0;
-  if (bq25792_read_u16(dev, REG31_IBUS_ADC, &w) == 0) {
-    st->ibus_ma = (int16_t)w; /* 1mA/bit, 2's complement */
-  }
-  if (bq25792_read_u16(dev, REG33_IBAT_ADC, &w) == 0) {
-    st->ibat_ma = (int16_t)w; /* 1mA/bit, 2's complement */
-  }
-  if (bq25792_read_u16(dev, REG35_VBUS_ADC, &w) == 0) {
-    st->vbus_mv = (int)w; /* 1mV/bit */
-  }
-  if (bq25792_read_u16(dev, REG3B_VBAT_ADC, &w) == 0) {
-    st->vbat_mv = (int)w; /* 1mV/bit */
-  }
-  if (bq25792_read_u16(dev, REG3D_VSYS_ADC, &w) == 0) {
-    st->vsys_mv = (int)w; /* 1mV/bit */
-  }
-  if (bq25792_read_u16(dev, REG41_TDIE_ADC, &w) == 0) {
-    st->tdie_c = (float)((int16_t)w) * 0.5f; /* 0.5C/bit, 2's complement */
-  }
+  if (bq25792_read_u16(dev, REG31_IBUS_ADC, &w) == 0) st->ibus_ma = (int16_t)w; /* 1mA/bit */
+  if (bq25792_read_u16(dev, REG33_IBAT_ADC, &w) == 0) st->ibat_ma = (int16_t)w; /* 1mA/bit */
+  if (bq25792_read_u16(dev, REG35_VBUS_ADC, &w) == 0) st->vbus_mv = (int)w;     /* 1mV/bit */
+  if (bq25792_read_u16(dev, REG3B_VBAT_ADC, &w) == 0) st->vbat_mv = (int)w;     /* 1mV/bit */
+  if (bq25792_read_u16(dev, REG3D_VSYS_ADC, &w) == 0) st->vsys_mv = (int)w;     /* 1mV/bit */
+  if (bq25792_read_u16(dev, REG41_TDIE_ADC, &w) == 0) st->tdie_c = (float)((int16_t)w) * 0.5f; /* 0.5C/bit */
 
   /* SoC estimate from per-cell voltage */
   if (st->cell_count < 1) st->cell_count = 1;
