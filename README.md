@@ -1,32 +1,43 @@
 # bq25792-utils
 
-TI **BQ25792** için Linux (Debian Trixie / Raspberry Pi CM5) üzerinde çalışan **user-space C kütüphanesi + CLI + cache daemon**.
+Raspberry Pi CM5 (Debian Trixie) üzerinde TI **BQ25792** şarj/power-path entegresini I2C ile okuyup;
 
-Hedefler:
-- I2C üzerinden BQ25792 register’larını okuyup **tek bir “durum” çıktısı** üretmek
-- Ölçümü **her 10 saniyede 1** güncellemek
-- 3. taraf uygulamalar okurken **şarj yüzdesinde dalgalanma görmemesini** sağlamak (stabilize edilmiş yüzde)
+- **bqctl**: CLI ile canlı durum/ADC okumaları
+- **bq25792d**: her **10 saniyede 1** ölçüm alıp `/run/bq25792/status.json` dosyasına **cache** yazan daemon
+- `libbq25792.so`: C kütüphanesi (diğer uygulamalar/SDK’lar için)
 
-> Önemli: BQ25792 bir şarj/power-path entegresidir, **fuel-gauge değildir**. Bu repodaki yüzde (`soc_*`) değerleri **VBAT (hücre başına voltaj) üzerinden kaba bir tahmindir**. Daha doğru yüzde için harici fuel gauge önerilir.
+sağlar.
 
-## Bileşenler
+> Not: BQ25792 bir **fuel-gauge** değildir. Repo içindeki SoC `%` değeri **VBAT (hücre başına voltaj) üzerinden kaba tahmin**dir. Kesin yüzde için harici fuel-gauge önerilir.
 
-- `libbq25792.so` : C API (charger durum + ADC ölçümleri + fault flag)
-- `bqctl`         : komut satırı aracı  
-  - `bqctl status --json` → CANLI okuma (anlık)
-  - `bqctl cached --json` → cache dosyasını okur (stabil)
-- `bq25792d`      : daemon (varsayılan **10 sn** aralıkla `/run/bq25792/status.json` üretir)
-- `systemd/bq25792d.service` : boot’ta otomatik başlatma
+---
+
+## İçerik
+
+- `src/bqctl.c` → CLI aracı
+- `src/bq25792d.c` → cache daemon
+- `src/bq25792.c`, `include/bq25792.h` → kütüphane
+- `systemd/bq25792d.service` → systemd servisi
+- `install.sh` → kurulum/güncelleme scripti
+
+---
+
+## Gereksinimler
+
+- Debian/Raspberry Pi OS (Trixie) + **systemd**
+- I2C aktif olmalı (ör. `/dev/i2c-10` mevcut)
+- Paketler:
+  - `build-essential`, `cmake`, `pkg-config`, `libi2c-dev`
+
+`install.sh` bunları otomatik kurar.
+
+---
 
 ## Kurulum
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake pkg-config libi2c-dev
-
-git clone <GITHUB_REPO_URL> bq25792-utils
+git clone https://github.com/abdullahdogan/bq25792-utils.git
 cd bq25792-utils
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-sudo cmake --install build
-sudo ldconfig
+chmod +x install.sh
+sudo ./install.sh
+```
