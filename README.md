@@ -1,21 +1,30 @@
 # bq25792-utils
 
-User-space C library + CLI for TI **BQ25792** (I2C) on Linux (e.g., Raspberry Pi CM5 / Debian Trixie).
+TI **BQ25792** için Linux (Debian Trixie / Raspberry Pi CM5) üzerinde çalışan **user-space C kütüphanesi + CLI + cache daemon**.
 
-What it gives you:
+Hedefler:
+- I2C üzerinden BQ25792 register’larını okuyup **tek bir “durum” çıktısı** üretmek
+- Ölçümü **her 10 saniyede 1** güncellemek
+- 3. taraf uygulamalar okurken **şarj yüzdesinde dalgalanma görmemesini** sağlamak (stabilize edilmiş yüzde)
 
-- `libbq25792.so` : C API to read charger status, ADC measurements, fault flags
-- `bqctl`         : command-line tool with optional `--json` output (easy to consume from Python/Node/Go/etc.)
+> Önemli: BQ25792 bir şarj/power-path entegresidir, **fuel-gauge değildir**. Bu repodaki yüzde (`soc_*`) değerleri **VBAT (hücre başına voltaj) üzerinden kaba bir tahmindir**. Daha doğru yüzde için harici fuel gauge önerilir.
 
-> Note: BQ25792 is a charger/power-path IC, not a fuel gauge. `soc_pct_est` is a **rough** estimate derived from pack voltage per cell.
+## Bileşenler
 
-## Build / Install (terminal)
+- `libbq25792.so` : C API (charger durum + ADC ölçümleri + fault flag)
+- `bqctl`         : komut satırı aracı  
+  - `bqctl status --json` → CANLI okuma (anlık)
+  - `bqctl cached --json` → cache dosyasını okur (stabil)
+- `bq25792d`      : daemon (varsayılan **10 sn** aralıkla `/run/bq25792/status.json` üretir)
+- `systemd/bq25792d.service` : boot’ta otomatik başlatma
+
+## Kurulum
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential cmake pkg-config libi2c-dev
 
-git clone <YOUR_GITHUB_URL_HERE> bq25792-utils
+git clone <GITHUB_REPO_URL> bq25792-utils
 cd bq25792-utils
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
@@ -23,50 +32,83 @@ sudo cmake --install build
 sudo ldconfig
 ```
 
-## Run
+## Daemon (10 sn’de 1 guncelleme)
 
-Defaults:
-- bus: `BQ_I2C_BUS` env (default `10`)
-- addr: `BQ_I2C_ADDR` env (default `0x6b`)
-
-Examples:
+Servisi etkinleştir:
 
 ```bash
-bqctl status
-bqctl status --json
-bqctl --bus 10 --addr 0x6b status --json
-bqctl raw
+sudo systemctl daemon-reload
+sudo systemctl enable --now bq25792d.service
 ```
 
-Example JSON:
-```json
-{
-  "vbus_present":true,
-  "pg":true,
-  "chg_stat":3,
-  "chg_stat_str":"Fast charge (CC)",
-  "vbat_mv":3820,
-  "ibat_ma":1200,
-  "soc_pct_est":68,
-  "fault_any":false
-}
+Kontrol:
+
+```bash
+systemctl status bq25792d.service
+cat /run/bq25792/status.json
 ```
 
-## Using from other languages
+### Konfigürasyon
 
-### Python (subprocess)
+Varsayılanlar:
+- `BQ_I2C_BUS=10`
+- `BQ_I2C_ADDR=0x6b`
+- `BQ_INTERVAL_SEC=10`
+- `BQ_STATUS_PATH=/run/bq25792/status.json`
 
+Override:
+
+```bash
+sudo systemctl edit bq25792d.service
+```
+
+Örnek:
+```ini
+[Service]
+Environment=BQ_I2C_BUS=10
+Environment=BQ_I2C_ADDR=0x6b
+Environment=BQ_INTERVAL_SEC=10
+```
+
+Sonra:
+```bash
+sudo systemctl restart bq25792d.service
+```
+
+## 3. taraf uygulamalar nasil okuyacak?
+
+**Önerilen (stabil yüzde):**
+- Dosyadan: `/run/bq25792/status.json`
+- veya komutla: `bqctl cached --json`
+
+Örnek Python:
 ```python
 import json, subprocess
-out = subprocess.check_output(["bqctl","status","--json"], text=True)
-st = json.loads(out)
-print(st["soc_pct_est"], st["fault_any"])
+st = json.loads(subprocess.check_output(["bqctl","cached","--json"], text=True))
+print(st["soc_pct"], st["fault_any"], st["chg_stat_str"])
 ```
 
-### Node.js
-
+Örnek Node.js:
 ```js
 const {execFileSync} = require("child_process");
-const st = JSON.parse(execFileSync("bqctl", ["status","--json"], {encoding:"utf8"}));
-console.log(st.soc_pct_est, st.fault_any);
+const st = JSON.parse(execFileSync("bqctl", ["cached","--json"], {encoding:"utf8"}));
+console.log(st.soc_pct, st.fault_any, st.chg_stat_str);
 ```
+
+## JSON alanlari (özet)
+
+- `soc_pct` : stabilize edilmiş yüzde (3. taraf için)
+- `soc_raw` : anlık (kaba) yüzde tahmini
+- `soc_filt`: filtrelenmiş float
+- `fault_any`, `fault0`, `fault1` : hata bilgileri
+- `chg_stat_str`, `vbus_stat_str` : okunabilir durum metinleri
+- `vbat_mv`, `ibat_ma`, `vbus_mv` ... : ADC ölçümleri
+
+## Stabilizasyon mantigi (kisa)
+
+- Ölçüm 10 sn’de 1 alınır.
+- Yüzde için EMA (low-pass) + **yön bazlı anti-jitter** uygulanır:
+  - Şarj olurken küçük düşüşler, deşarj olurken küçük yükselişler bastırılır.
+- Rate limit: varsayılan **en fazla 1%/dakika** değişim (UI dalgalanması önlenir).
+
+İsterseniz cihazınızın gerçek karakteristiğine göre bu parametreleri (alpha, eşik, rate-limit) ayarlayabiliriz.
