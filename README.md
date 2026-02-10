@@ -48,3 +48,12 @@ git pull
 sudo ./install.sh
 
 ```
+## Kullanım
+
+```bash
+bqctl status
+json Çıktı:
+bqctl --json status
+bqctl cached
+cat /run/bq25792/status.json (Cache dosyası daemon tarafından 10 saniyede 1 atomik güncellenir).
+```
