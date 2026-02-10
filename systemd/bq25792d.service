@@ -1,0 +1,22 @@
+[Unit]
+Description=BQ25792 durum cache servisi (10 sn'de 1 guncelleme)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bq25792d
+Restart=always
+RestartSec=1
+
+# systemd runtime + state klasorleri
+RuntimeDirectory=bq25792
+StateDirectory=bq25792
+
+# Varsayilan ortam ayarlari (gerekirse override edin)
+Environment=BQ_I2C_BUS=10
+Environment=BQ_I2C_ADDR=0x6b
+Environment=BQ_INTERVAL_SEC=10
+Environment=BQ_STATUS_PATH=/run/bq25792/status.json
+
+[Install]
+WantedBy=multi-user.target
