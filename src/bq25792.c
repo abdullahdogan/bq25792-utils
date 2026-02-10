@@ -14,11 +14,15 @@ struct bq25792_dev {
   int fd;
   int bus;
   uint8_t addr;
+  int inited;
 };
 
-/* Register map subset (see TI BQ25792 datasheet) */
+/* Register map subset (TI BQ25792 datasheet) */
 enum {
   REG0A_RECHG_CTRL      = 0x0A, /* CELL_1:0 in bits 7:6 (battery cell count) */
+  REG10_CHG_CTRL_1      = 0x10, /* WATCHDOG_2:0 in bits 2:0, WD_RST in bit3 */
+  REG14_CHG_CTRL_5      = 0x14, /* EN_IBAT in bit5 */
+
   REG1B_CHG_STATUS_0    = 0x1B, /* 8-bit */
   REG1C_CHG_STATUS_1    = 0x1C, /* 8-bit */
   REG26_FAULT_FLAG_0    = 0x26, /* 8-bit */
@@ -36,8 +40,9 @@ enum {
 };
 
 static int clampi(int v, int lo, int hi) { return (v < lo) ? lo : (v > hi) ? hi : v; }
+static uint16_t swap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
 
-/* Rough Li-ion OCV -> SoC table (per-cell, mV). Adjust for your chemistry/load profile. */
+/* Kaba Li-ion OCV -> SoC (per-cell, mV). Kendi kimyaniza/yuk profilinize gore kalibre edin. */
 static int soc_from_vcell_mv(int vcell_mv) {
   static const int mv[]  = { 3300, 3400, 3500, 3600, 3650, 3700, 3800, 3900, 4000, 4100, 4200 };
   static const int soc[] = {    0,   10,   20,   30,   40,   50,   60,   70,   80,   90,  100 };
@@ -78,6 +83,7 @@ int bq25792_open(bq25792_dev_t **out, int i2c_bus, uint8_t i2c_addr) {
   dev->fd = fd;
   dev->bus = i2c_bus;
   dev->addr = i2c_addr;
+  dev->inited = 0;
 
   *out = dev;
   return 0;
@@ -101,7 +107,9 @@ int bq25792_read_u16(bq25792_dev_t *dev, uint8_t reg, uint16_t *val) {
   if (!dev || !val) return -EINVAL;
   int r = i2c_smbus_read_word_data(dev->fd, reg);
   if (r < 0) return -errno;
-  *val = (uint16_t)r;
+
+  /* SMBus word byte sirasi BQ25792 ile ters olabilir -> byte-swap */
+  *val = swap16((uint16_t)r);
   return 0;
 }
 
@@ -111,19 +119,41 @@ static int write_u8(bq25792_dev_t *dev, uint8_t reg, uint8_t v) {
   return 0;
 }
 
+static int rmw_u8(bq25792_dev_t *dev, uint8_t reg, uint8_t clear_mask, uint8_t set_mask) {
+  uint8_t v = 0;
+  int rc = bq25792_read_u8(dev, reg, &v);
+  if (rc) return rc;
+  v = (uint8_t)((v & ~clear_mask) | set_mask);
+  return write_u8(dev, reg, v);
+}
+
+static int bq25792_apply_safe_defaults(bq25792_dev_t *dev) {
+  /* I2C watchdog'u disable et (REG10[2:0]=0) -> ADC_EN / EN_IBAT beklenmedik reset olmasin */
+  int rc = rmw_u8(dev, REG10_CHG_CTRL_1, 0x07, 0x00);
+  if (rc) return rc;
+
+  /* WD status temizlemek icin WD_RST pulse (opsiyonel) */
+  (void)rmw_u8(dev, REG10_CHG_CTRL_1, 0x00, (1u << 3));
+
+  /* IBAT discharge current sensing enable (REG14[5]) */
+  rc = rmw_u8(dev, REG14_CHG_CTRL_5, 0x00, (1u << 5));
+  return rc;
+}
+
 /*
   REG2E (ADC Control):
    bit7 ADC_EN
    bit6 ADC_RATE: 0=continuous, 1=one-shot
-   bit5-4 ADC_SAMPLE: 0=15-bit eff, 1=14-bit, 2=13-bit, 3=12-bit
+   bit5-4 ADC_SAMPLE: 00=15-bit, 01=14-bit, 10=13-bit, 11=12-bit
 */
 int bq25792_adc_enable(bq25792_dev_t *dev, bool enable_continuous, bool high_res_15bit) {
   if (!dev) return -EINVAL;
 
   uint8_t v = 0;
-  v |= (1u << 7);              /* ADC_EN */
+  v |= (1u << 7); /* ADC_EN */
   if (!enable_continuous) v |= (1u << 6); /* 1 = one-shot */
-  if (!high_res_15bit)  v |= (1u << 4);   /* 01b -> 14-bit effective */
+  /* ADC_SAMPLE[5:4]: 00=15-bit, 01=14-bit */
+  if (!high_res_15bit) v |= (1u << 4);
 
   return write_u8(dev, REG2E_ADC_CONTROL, v);
 }
@@ -161,6 +191,11 @@ int bq25792_read_status(bq25792_dev_t *dev, bq25792_status_t *st, bool ensure_ad
   if (!dev || !st) return -EINVAL;
   memset(st, 0, sizeof(*st));
 
+  if (!dev->inited) {
+    (void)bq25792_apply_safe_defaults(dev);
+    dev->inited = 1;
+  }
+
   /* Cell count from REG0A[7:6] (1s..4s) */
   uint8_t reg0a = 0;
   if (bq25792_read_u8(dev, REG0A_RECHG_CTRL, &reg0a) == 0) {
@@ -197,18 +232,21 @@ int bq25792_read_status(bq25792_dev_t *dev, bq25792_status_t *st, bool ensure_ad
   st->fault1 = f1;
   st->fault_any = (f0 != 0) || (f1 != 0) || st->watchdog_expired || st->poor_source;
 
+  /* ADC enable if requested */
   if (ensure_adc_on) {
     (void)bq25792_adc_enable(dev, true, true);
+    /* ADC enable sonrasi ilk conversion 0 gelebilir */
+    usleep(50000);
   }
 
-  /* ADC reads */
+  /* ADC reads (LSB=1mV/1mA, TDIE=0.5C) */
   uint16_t w = 0;
-  if (bq25792_read_u16(dev, REG31_IBUS_ADC, &w) == 0) st->ibus_ma = (int16_t)w; /* 1mA/bit */
-  if (bq25792_read_u16(dev, REG33_IBAT_ADC, &w) == 0) st->ibat_ma = (int16_t)w; /* 1mA/bit */
-  if (bq25792_read_u16(dev, REG35_VBUS_ADC, &w) == 0) st->vbus_mv = (int)w;     /* 1mV/bit */
-  if (bq25792_read_u16(dev, REG3B_VBAT_ADC, &w) == 0) st->vbat_mv = (int)w;     /* 1mV/bit */
-  if (bq25792_read_u16(dev, REG3D_VSYS_ADC, &w) == 0) st->vsys_mv = (int)w;     /* 1mV/bit */
-  if (bq25792_read_u16(dev, REG41_TDIE_ADC, &w) == 0) st->tdie_c = (float)((int16_t)w) * 0.5f; /* 0.5C/bit */
+  if (bq25792_read_u16(dev, REG31_IBUS_ADC, &w) == 0) st->ibus_ma = (int16_t)w;
+  if (bq25792_read_u16(dev, REG33_IBAT_ADC, &w) == 0) st->ibat_ma = (int16_t)w;
+  if (bq25792_read_u16(dev, REG35_VBUS_ADC, &w) == 0) st->vbus_mv = (int)w;
+  if (bq25792_read_u16(dev, REG3B_VBAT_ADC, &w) == 0) st->vbat_mv = (int)w;
+  if (bq25792_read_u16(dev, REG3D_VSYS_ADC, &w) == 0) st->vsys_mv = (int)w;
+  if (bq25792_read_u16(dev, REG41_TDIE_ADC, &w) == 0) st->tdie_c = (float)((int16_t)w) * 0.5f;
 
   /* SoC estimate from per-cell voltage */
   if (st->cell_count < 1) st->cell_count = 1;
