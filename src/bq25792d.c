@@ -98,10 +98,10 @@ static int infer_dir(const bq25792_status_t *st) {
   return 0;
 }
 
-/* Stabilization:
+/* Stabilizasyon:
    - EMA (alpha=0.15)
    - direction-based anti-jitter
-   - rate limit: max 1%/minute
+   - rate limit: max 1%/dakika
 */
 static void soc_filter_update(soc_filter_t *f, int soc_raw, int dir) {
   soc_raw = clampi(soc_raw, 0, 100);
