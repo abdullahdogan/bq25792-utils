@@ -173,6 +173,8 @@ int main(int argc, char **argv) {
     uint16_t v16;
 
     if (bq25792_read_u8(dev, 0x0A, &v8) == 0) printf("REG0A: 0x%02X\n", v8);
+    if (bq25792_read_u8(dev, 0x10, &v8) == 0) printf("REG10: 0x%02X\n", v8);
+    if (bq25792_read_u8(dev, 0x14, &v8) == 0) printf("REG14: 0x%02X\n", v8);
     if (bq25792_read_u8(dev, 0x1B, &v8) == 0) printf("REG1B: 0x%02X\n", v8);
     if (bq25792_read_u8(dev, 0x1C, &v8) == 0) printf("REG1C: 0x%02X\n", v8);
     if (bq25792_read_u8(dev, 0x26, &v8) == 0) printf("REG26: 0x%02X\n", v8);
