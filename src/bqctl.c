@@ -1,3 +1,4 @@
+// src/bqctl.c
 #include "bq25792.h"
 
 #include <errno.h>
@@ -20,9 +21,9 @@ static const char* env_str(const char *name, const char *defv) {
 static void print_usage(const char *argv0) {
   fprintf(stderr,
     "Kullanim:\n"
-    "  %s [--bus N] [--addr 0x6b] [--no-adc] status [--json]\n"
+    "  %s [--bus N] [--addr 0x6b] [--no-adc] [--json] status\n"
     "  %s [--bus N] [--addr 0x6b] raw\n"
-    "  %s cached [--json]\n\n"
+    "  %s [--json] cached\n\n"
     "Ortam degiskenleri:\n"
     "  BQ_I2C_BUS      (orn: 10)\n"
     "  BQ_I2C_ADDR     (orn: 0x6b)\n"
@@ -40,9 +41,24 @@ static void json_int(const char *k, int v, int *first) {
   *first = 0;
 }
 
+static void json_u8(const char *k, unsigned v, int *first) {
+  printf("%s\"%s\":%u", (*first ? "" : ","), k, v);
+  *first = 0;
+}
+
+static void json_float1(const char *k, float v, int *first) {
+  printf("%s\"%s\":%.1f", (*first ? "" : ","), k, (double)v);
+  *first = 0;
+}
+
+static void json_float2(const char *k, float v, int *first) {
+  printf("%s\"%s\":%.2f", (*first ? "" : ","), k, (double)v);
+  *first = 0;
+}
+
 static void json_str(const char *k, const char *v, int *first) {
   printf("%s\"%s\":\"", (*first ? "" : ","), k);
-  for (const char *p = v; *p; p++) {
+  for (const char *p = v ? v : ""; *p; p++) {
     if (*p == '"' || *p == '\\') putchar('\\');
     putchar(*p);
   }
@@ -50,20 +66,27 @@ static void json_str(const char *k, const char *v, int *first) {
   *first = 0;
 }
 
-static int cmd_cached(int json) {
-  (void)json;
+/* cached: /run/bq25792/status.json dosyasini oldugu gibi basar.
+   --json opsiyonu sadece uyumluluk icin (cikti zaten JSON). */
+static int cmd_cached(void) {
   const char *path = env_str("BQ_STATUS_PATH", "/run/bq25792/status.json");
   FILE *f = fopen(path, "rb");
   if (!f) {
     fprintf(stderr, "bqctl: cached okunamadi: %s (%s)\n", path, strerror(errno));
     return 1;
   }
+
   char buf[4096];
   size_t n;
   while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
     fwrite(buf, 1, n, stdout);
   }
   fclose(f);
+
+  /* Dosya newline icermiyorsa terminalde satir bozulmasin */
+  if (buf[0] != '\0') {
+    /* best-effort: son karakter newline mi kontrol etmek icin tekrar dosyayi okumuyoruz */
+  }
   return 0;
 }
 
@@ -71,22 +94,28 @@ int main(int argc, char **argv) {
   int bus  = env_int("BQ_I2C_BUS", 10);
   int addr = env_int("BQ_I2C_ADDR", 0x6B);
   int ensure_adc = 1;
+  int json = 0;
 
   static struct option long_opts[] = {
-    {"bus", required_argument, 0, 'b'},
-    {"addr", required_argument, 0, 'a'},
-    {"no-adc", no_argument, 0, 'n'},
-    {"help", no_argument, 0, 'h'},
+    {"bus",     required_argument, 0, 'b'},
+    {"addr",    required_argument, 0, 'a'},
+    {"no-adc",  no_argument,       0, 'n'},
+    {"json",    no_argument,       0, 'j'}, /* IMPORTANT: cached --json icin de gerekli */
+    {"help",    no_argument,       0, 'h'},
     {0,0,0,0}
   };
 
   int c;
-  while ((c = getopt_long(argc, argv, "b:a:nh", long_opts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "b:a:njh", long_opts, NULL)) != -1) {
     switch (c) {
       case 'b': bus = (int)strtol(optarg, NULL, 0); break;
       case 'a': addr = (int)strtol(optarg, NULL, 0); break;
       case 'n': ensure_adc = 0; break;
-      case 'h': default: print_usage(argv[0]); return 2;
+      case 'j': json = 1; break;
+      case 'h':
+      default:
+        print_usage(argv[0]);
+        return 2;
     }
   }
 
@@ -98,22 +127,20 @@ int main(int argc, char **argv) {
   const char *cmd = argv[optind++];
 
   if (strcmp(cmd, "cached") == 0) {
-    int json = 0;
-    if (optind < argc && strcmp(argv[optind], "--json") == 0) json = 1;
-    return cmd_cached(json);
+    /* json flag sadece kabul edilir (cikti zaten JSON) */
+    (void)json;
+    return cmd_cached();
   }
 
   bq25792_dev_t *dev = NULL;
   int rc = bq25792_open(&dev, bus, (uint8_t)addr);
   if (rc) {
-    fprintf(stderr, "bqctl: open failed (bus=%d addr=0x%02x): %s\n", bus, addr & 0xFF, strerror(-rc));
+    fprintf(stderr, "bqctl: open failed (bus=%d addr=0x%02x): %s\n",
+            bus, addr & 0xFF, strerror(-rc));
     return 1;
   }
 
   if (strcmp(cmd, "status") == 0) {
-    int json = 0;
-    if (optind < argc && strcmp(argv[optind], "--json") == 0) json = 1;
-
     bq25792_status_t st;
     rc = bq25792_read_status(dev, &st, ensure_adc);
     if (rc) {
@@ -125,6 +152,14 @@ int main(int argc, char **argv) {
     if (json) {
       int first = 1;
       printf("{");
+
+      json_int("bus", bus, &first);
+      {
+        char addr_s[8];
+        snprintf(addr_s, sizeof(addr_s), "0x%02x", addr & 0xFF);
+        json_str("addr", addr_s, &first);
+      }
+
       json_bool("vbus_present", st.vbus_present, &first);
       json_bool("ac1_present", st.ac1_present, &first);
       json_bool("ac2_present", st.ac2_present, &first);
@@ -134,11 +169,12 @@ int main(int argc, char **argv) {
       json_bool("watchdog_expired", st.watchdog_expired, &first);
       json_bool("poor_source", st.poor_source, &first);
 
-      json_int("cell_count", st.cell_count, &first);
-      json_int("chg_stat", st.chg_stat, &first);
+      json_u8("cell_count", st.cell_count, &first);
+
+      json_u8("chg_stat", st.chg_stat, &first);
       json_str("chg_stat_str", bq25792_chg_stat_str(st.chg_stat), &first);
 
-      json_int("vbus_stat", st.vbus_stat, &first);
+      json_u8("vbus_stat", st.vbus_stat, &first);
       json_str("vbus_stat_str", bq25792_vbus_stat_str(st.vbus_stat), &first);
       json_bool("bc12_done", st.bc12_done, &first);
 
@@ -147,27 +183,32 @@ int main(int argc, char **argv) {
       json_int("vbus_mv", st.vbus_mv, &first);
       json_int("vbat_mv", st.vbat_mv, &first);
       json_int("vsys_mv", st.vsys_mv, &first);
-
-      printf("%s\"tdie_c\":%.1f", (first ? "" : ","), st.tdie_c); first = 0;
+      json_float1("tdie_c", st.tdie_c, &first);
 
       json_int("soc_pct_est", st.soc_pct_est, &first);
 
-      json_int("fault0", st.fault0, &first);
-      json_int("fault1", st.fault1, &first);
+      json_u8("fault0", st.fault0, &first);
+      json_u8("fault1", st.fault1, &first);
       json_bool("fault_any", st.fault_any, &first);
 
       printf("}\n");
     } else {
       printf("BQ25792 durum (bus=%d addr=0x%02x)\n", bus, addr & 0xFF);
-      printf("  Giris : VBUS=%d AC1=%d AC2=%d PG=%d\n", st.vbus_present, st.ac1_present, st.ac2_present, st.pg);
-      printf("  DPM   : IINDPM=%d VINDPM=%d poor_src=%d wd_exp=%d\n", st.iindpm, st.vindpm, st.poor_source, st.watchdog_expired);
-      printf("  Sarj  : chg_stat=%u (%s)\n", st.chg_stat, bq25792_chg_stat_str(st.chg_stat));
-      printf("         vbus_stat=0x%X (%s) bc12_done=%d\n", st.vbus_stat, bq25792_vbus_stat_str(st.vbus_stat), st.bc12_done);
+      printf("  Giris : VBUS=%d AC1=%d AC2=%d PG=%d\n",
+             st.vbus_present, st.ac1_present, st.ac2_present, st.pg);
+      printf("  DPM   : IINDPM=%d VINDPM=%d poor_src=%d wd_exp=%d\n",
+             st.iindpm, st.vindpm, st.poor_source, st.watchdog_expired);
+      printf("  Sarj  : chg_stat=%u (%s)\n",
+             st.chg_stat, bq25792_chg_stat_str(st.chg_stat));
+      printf("         vbus_stat=0x%X (%s) bc12_done=%d\n",
+             st.vbus_stat, bq25792_vbus_stat_str(st.vbus_stat), st.bc12_done);
       printf("  ADC   : VBUS=%dmV VBAT=%dmV VSYS=%dmV IBUS=%dmA IBAT=%dmA TDIE=%.1fC\n",
              st.vbus_mv, st.vbat_mv, st.vsys_mv, st.ibus_ma, st.ibat_ma, st.tdie_c);
       printf("  Pil   : cells=%u SoC_est=%d%%\n", st.cell_count, st.soc_pct_est);
-      printf("  Hata  : any=%d fault0=0x%02X fault1=0x%02X\n", st.fault_any, st.fault0, st.fault1);
+      printf("  Hata  : any=%d fault0=0x%02X fault1=0x%02X\n",
+             st.fault_any, st.fault0, st.fault1);
     }
+
   } else if (strcmp(cmd, "raw") == 0) {
     uint8_t v8;
     uint16_t v16;
@@ -186,6 +227,7 @@ int main(int argc, char **argv) {
     if (bq25792_read_u16(dev, 0x3B, &v16) == 0) printf("REG3B (VBAT): 0x%04X\n", v16);
     if (bq25792_read_u16(dev, 0x3D, &v16) == 0) printf("REG3D (VSYS): 0x%04X\n", v16);
     if (bq25792_read_u16(dev, 0x41, &v16) == 0) printf("REG41 (TDIE): 0x%04X\n", v16);
+
   } else {
     print_usage(argv[0]);
     bq25792_close(dev);
