@@ -5,6 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(BQ25792_BUILD_CLI "Build bqctl CLI" ON)
+option(BQ25792_BUILD_DAEMON "Build bq25792d daemon" ON)
 
 add_library(bq25792 SHARED
     src/bq25792.c
@@ -30,6 +31,11 @@ if (BQ25792_BUILD_CLI)
   target_link_libraries(bqctl PRIVATE bq25792)
 endif()
 
+if (BQ25792_BUILD_DAEMON)
+  add_executable(bq25792d src/bq25792d.c)
+  target_link_libraries(bq25792d PRIVATE bq25792)
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS bq25792
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -41,3 +47,11 @@ install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 if (BQ25792_BUILD_CLI)
   install(TARGETS bqctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
+
+if (BQ25792_BUILD_DAEMON)
+  install(TARGETS bq25792d RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# systemd unit install (Debian/RPi OS usually uses /lib/systemd/system)
+set(SYSTEMD_UNIT_DIR "/lib/systemd/system" CACHE PATH "systemd unit install dir")
+install(FILES systemd/bq25792d.service DESTINATION ${SYSTEMD_UNIT_DIR})
