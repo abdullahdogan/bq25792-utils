@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/bq25792d
+ExecStart=/usr/local/bin/bq25792d
 Restart=always
 RestartSec=1
 
