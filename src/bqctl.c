@@ -12,15 +12,22 @@ static int env_int(const char *name, int defv) {
   return (int)strtol(s, NULL, 0);
 }
 
+static const char* env_str(const char *name, const char *defv) {
+  const char *s = getenv(name);
+  return (s && *s) ? s : defv;
+}
+
 static void print_usage(const char *argv0) {
   fprintf(stderr,
-    "Usage:\n"
+    "Kullanim:\n"
     "  %s [--bus N] [--addr 0x6b] [--no-adc] status [--json]\n"
-    "  %s [--bus N] [--addr 0x6b] raw\n\n"
-    "Environment defaults:\n"
-    "  BQ_I2C_BUS   (e.g., 10)\n"
-    "  BQ_I2C_ADDR  (e.g., 0x6b)\n",
-    argv0, argv0);
+    "  %s [--bus N] [--addr 0x6b] raw\n"
+    "  %s cached [--json]\n\n"
+    "Ortam degiskenleri:\n"
+    "  BQ_I2C_BUS      (orn: 10)\n"
+    "  BQ_I2C_ADDR     (orn: 0x6b)\n"
+    "  BQ_STATUS_PATH  (cached icin, varsayilan: /run/bq25792/status.json)\n",
+    argv0, argv0, argv0);
 }
 
 static void json_bool(const char *k, int v, int *first) {
@@ -41,6 +48,23 @@ static void json_str(const char *k, const char *v, int *first) {
   }
   printf("\"");
   *first = 0;
+}
+
+static int cmd_cached(int json) {
+  (void)json;
+  const char *path = env_str("BQ_STATUS_PATH", "/run/bq25792/status.json");
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    fprintf(stderr, "bqctl: cached okunamadi: %s (%s)\n", path, strerror(errno));
+    return 1;
+  }
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+    fwrite(buf, 1, n, stdout);
+  }
+  fclose(f);
+  return 0;
 }
 
 int main(int argc, char **argv) {
@@ -72,6 +96,12 @@ int main(int argc, char **argv) {
   }
 
   const char *cmd = argv[optind++];
+
+  if (strcmp(cmd, "cached") == 0) {
+    int json = 0;
+    if (optind < argc && strcmp(argv[optind], "--json") == 0) json = 1;
+    return cmd_cached(json);
+  }
 
   bq25792_dev_t *dev = NULL;
   int rc = bq25792_open(&dev, bus, (uint8_t)addr);
@@ -118,7 +148,6 @@ int main(int argc, char **argv) {
       json_int("vbat_mv", st.vbat_mv, &first);
       json_int("vsys_mv", st.vsys_mv, &first);
 
-      /* float */
       printf("%s\"tdie_c\":%.1f", (first ? "" : ","), st.tdie_c); first = 0;
 
       json_int("soc_pct_est", st.soc_pct_est, &first);
@@ -129,15 +158,15 @@ int main(int argc, char **argv) {
 
       printf("}\n");
     } else {
-      printf("BQ25792 status (bus=%d addr=0x%02x)\n", bus, addr & 0xFF);
-      printf("  Input : VBUS=%d AC1=%d AC2=%d PG=%d\n", st.vbus_present, st.ac1_present, st.ac2_present, st.pg);
+      printf("BQ25792 durum (bus=%d addr=0x%02x)\n", bus, addr & 0xFF);
+      printf("  Giris : VBUS=%d AC1=%d AC2=%d PG=%d\n", st.vbus_present, st.ac1_present, st.ac2_present, st.pg);
       printf("  DPM   : IINDPM=%d VINDPM=%d poor_src=%d wd_exp=%d\n", st.iindpm, st.vindpm, st.poor_source, st.watchdog_expired);
-      printf("  Charge: chg_stat=%u (%s)\n", st.chg_stat, bq25792_chg_stat_str(st.chg_stat));
+      printf("  Sarj  : chg_stat=%u (%s)\n", st.chg_stat, bq25792_chg_stat_str(st.chg_stat));
       printf("         vbus_stat=0x%X (%s) bc12_done=%d\n", st.vbus_stat, bq25792_vbus_stat_str(st.vbus_stat), st.bc12_done);
       printf("  ADC   : VBUS=%dmV VBAT=%dmV VSYS=%dmV IBUS=%dmA IBAT=%dmA TDIE=%.1fC\n",
              st.vbus_mv, st.vbat_mv, st.vsys_mv, st.ibus_ma, st.ibat_ma, st.tdie_c);
-      printf("  Batt  : cells=%u SoC_est=%d%%\n", st.cell_count, st.soc_pct_est);
-      printf("  Fault : any=%d fault0=0x%02X fault1=0x%02X\n", st.fault_any, st.fault0, st.fault1);
+      printf("  Pil   : cells=%u SoC_est=%d%%\n", st.cell_count, st.soc_pct_est);
+      printf("  Hata  : any=%d fault0=0x%02X fault1=0x%02X\n", st.fault_any, st.fault0, st.fault1);
     }
   } else if (strcmp(cmd, "raw") == 0) {
     uint8_t v8;
